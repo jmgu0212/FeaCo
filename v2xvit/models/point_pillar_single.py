@@ -5,14 +5,16 @@ from v2xvit.models.sub_modules.point_pillar_scatter import PointPillarScatter
 from v2xvit.models.sub_modules.base_bev_backbone import BaseBEVBackbone
 from v2xvit.models.sub_modules.downsample_conv import DownsampleConv
 from v2xvit.models.sub_modules.naive_compress import NaiveCompressor
-from v2xvit.models.sub_modules.self_attn import AttFusion
+from v2xvit.models.sub_modules.f_cooper_fuse import SpatialFusion
+import torch
 
 
-class PointPillarOPV2V(nn.Module):
+
+class PointPillarSingle(nn.Module):
     def __init__(self, args):
-        super(PointPillarOPV2V, self).__init__()
+        super(PointPillarSingle, self).__init__()
 
-        self.max_cav = 5
+        self.max_cav = args['max_cav']
         # PIllar VFE
         self.pillar_vfe = PillarVFE(args['pillar_vfe'],
                                     num_point_features=4,
@@ -31,11 +33,11 @@ class PointPillarOPV2V(nn.Module):
             self.compression = True
             self.naive_compressor = NaiveCompressor(256, args['compression'])
 
-        self.fusion_net = AttFusion(256)
+        self.fusion_net = SpatialFusion()
 
-        self.cls_head = nn.Conv2d(192 * 2, args['anchor_number'],
+        self.cls_head = nn.Conv2d(128 * 2, args['anchor_number'],
                                   kernel_size=1)
-        self.reg_head = nn.Conv2d(192 * 2, 7 * args['anchor_number'],
+        self.reg_head = nn.Conv2d(128 * 2, 7 * args['anchor_number'],
                                   kernel_size=1)
 
         if args['backbone_fix']:
@@ -66,16 +68,17 @@ class PointPillarOPV2V(nn.Module):
         for p in self.reg_head.parameters():
             p.requires_grad = False
 
+    def regroup(self, x, record_len):
+        cum_sum_len = torch.cumsum(record_len, dim=0)
+        split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
+        return split_x
+
     def forward(self, data_dict):
         voxel_features = data_dict['processed_lidar']['voxel_features']
         voxel_coords = data_dict['processed_lidar']['voxel_coords']
         voxel_num_points = data_dict['processed_lidar']['voxel_num_points']
         record_len = data_dict['record_len']
         spatial_correction_matrix = data_dict['spatial_correction_matrix']
-
-        # B, max_cav, 3(dt dv infra), 1, 1
-        prior_encoding =\
-            data_dict['prior_encoding'].unsqueeze(-1).unsqueeze(-1)
 
         batch_dict = {'voxel_features': voxel_features,
                       'voxel_coords': voxel_coords,
@@ -88,15 +91,23 @@ class PointPillarOPV2V(nn.Module):
         batch_dict = self.backbone(batch_dict)
 
         spatial_features_2d = batch_dict['spatial_features_2d']
+        # print(spatial_features_2d.shape)
         # downsample feature to reduce memory
         if self.shrink_flag:
             spatial_features_2d = self.shrink_conv(spatial_features_2d)
-        # compressor
+        # # compressor
         if self.compression:
             spatial_features_2d = self.naive_compressor(spatial_features_2d)
+        
 
-        fused_feature = self.fusion_net(spatial_features_2d, record_len)
+        split_x = self.regroup(spatial_features_2d, record_len)
+        out = []
 
+        for xx in split_x:
+            out.append(xx[0].unsqueeze(0))
+        fused_feature =  torch.cat(out, dim=0)
+        # print(fused_feature.shape)
+        # exit()
         psm = self.cls_head(fused_feature)
         rm = self.reg_head(fused_feature)
 

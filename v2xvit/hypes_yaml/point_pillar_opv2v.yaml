@@ -1,7 +1,7 @@
 name: point_pillar_opv2v
 #root_dir: '/home/runshengxu/project/Cooperative_perception/opencood/tmp'
-root_dir: 'v2xset/train'
-validate_dir: 'v2xset/validate'
+root_dir: '/data/opv2v/train'
+validate_dir: '/data/opv2v/validate'
 
 wild_setting:
   async: false
@@ -13,6 +13,14 @@ wild_setting:
   data_size: 1.06 # Mb!!
   transmission_speed: 27 # Mbps!!
   backbone_delay: 10 # ms
+
+noise_setting:
+  add_noise: True
+  args: 
+    pos_std: 0
+    rot_std: 0
+    pos_mean: 0
+    rot_mean: 0
 
 yaml_parser: "load_point_pillar_params"
 train_params:

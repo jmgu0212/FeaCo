@@ -18,6 +18,7 @@ from v2xvit.utils import box_utils
 from v2xvit.utils.pcd_utils import \
     mask_points_by_range, mask_ego_points, shuffle_points, \
     downsample_lidar_minimum
+from v2xvit.utils.pose_utils import add_noise_data_dict
 
 
 class LateFusionDataset(basedataset.BaseDataset):
@@ -29,6 +30,8 @@ class LateFusionDataset(basedataset.BaseDataset):
 
     def __getitem__(self, idx):
         base_data_dict = self.retrieve_base_data(idx, cur_ego_pose_flag=True)
+        base_data_dict = add_noise_data_dict(base_data_dict,self.params['noise_setting'])
+        
         if self.train:
             reformat_data_dict = self.get_item_train(base_data_dict)
         else:

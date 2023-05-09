@@ -1,34 +1,36 @@
+# -*- coding: utf-8 -*-
+# Author: Hao Xiang <haxiang@g.ucla.edu>
+# License: TDG-Attribution-NonCommercial-NoDistrib
+
+
 """
 Implementation of V2VNet Fusion
 """
-
+import random
 import torch
 import torch.nn as nn
 
-from v2xvit.models.sub_modules.torch_transformation_utils import \
+from opencood.models.sub_modules.torch_transformation_utils import \
     get_discretized_transformation_matrix, get_transformation_matrix, \
     warp_affine, get_rotated_roi
-from v2xvit.models.sub_modules.convgru import ConvGRU
+from opencood.models.sub_modules.convgru import ConvGRU
 
 
 class V2VNetFusion(nn.Module):
     def __init__(self, args):
         super(V2VNetFusion, self).__init__()
+        
         in_channels = args['in_channels']
         H, W = args['conv_gru']['H'], args['conv_gru']['W']
         kernel_size = args['conv_gru']['kernel_size']
         num_gru_layers = args['conv_gru']['num_layers']
 
-        # self.use_temporal_encoding = args['use_temporal_encoding']
-        self.use_temporal_encoding = False
         self.discrete_ratio = args['voxel_size'][0]
         self.downsample_rate = args['downsample_rate']
         self.num_iteration = args['num_iteration']
         self.gru_flag = args['gru_flag']
         self.agg_operator = args['agg_operator']
 
-        self.cnn = nn.Conv2d(in_channels + 1, in_channels, kernel_size=3,
-                             stride=1, padding=1)
         self.msg_cnn = nn.Conv2d(in_channels * 2, in_channels, kernel_size=3,
                                  stride=1, padding=1)
         self.conv_gru = ConvGRU(input_size=(H, W),
@@ -46,23 +48,68 @@ class V2VNetFusion(nn.Module):
         split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
         return split_x
 
-    def forward(self, x, record_len, pairwise_t_matrix, prior_encoding):
-        # x: (B,C,H,W)
-        # record_len: (B)
-        # pairwise_t_matrix: (B,L,L,4,4)
-        # prior_encoding: (B,3)
+    def forward(self, x, record_len, pairwise_t_matrix):
+        """
+        Fusion forwarding.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            input data, (B, C, H, W)
+            
+        record_len : list
+            shape: (B)
+            
+        pairwise_t_matrix : torch.Tensor
+            The transformation matrix from each cav to ego, 
+            shape: (B, L, L, 4, 4) 
+            
+        Returns
+        -------
+        Fused feature.
+        """
         _, C, H, W = x.shape
         B, L = pairwise_t_matrix.shape[:2]
 
-        if self.use_temporal_encoding:
-            # (B,1,1,1)
-            dt = prior_encoding[:, 1].to(torch.int).unsqueeze(1).unsqueeze(
-                2).unsqueeze(3)
-            x = torch.cat([x, dt.repeat(1, 1, H, W)], dim=1)
-            x = self.cnn(x)
-
         # split x:[(L1, C, H, W), (L2, C, H, W)]
         split_x = self.regroup(x, record_len)
+        outs = []
+        
+        #mask
+        for xx in split_x: 
+            xx_bk = xx[0]
+            
+            #channel
+            # xx = xx[:,:int(C/2)]
+            # zeros_mask = torch.zeros_like(xx).to(xx.device)
+            # out = torch.cat((xx,zeros_mask),dim=1)
+            
+            #H
+            # xx = xx[:,:,:int(H/2)]
+            # zeros_mask = torch.zeros_like(xx).to(xx.device)
+            # out = torch.cat((xx,zeros_mask),dim=2)
+            
+            #W
+            # xx = xx[:,:,:,:int(W/2)]
+            # zeros_mask = torch.zeros_like(xx).to(xx.device)
+            # out = torch.cat((xx,zeros_mask),dim=3)
+            
+            #lft
+            zeros_mask = torch.zeros([xx.shape[0],int(C/4),int(H/4),int(W/4)]).to(xx.device)
+            print(zeros_mask.shape)
+            for cnt in range(20):
+                random_c = random.randint(0, C-int(C/4))
+                random_h = random.randint(0, H-int(H/4))
+                random_w = random.randint(0, W-int(W/4))
+                xx[:,random_c:random_c+int(C/4),random_h:random_h+int(H/4),random_w:random_w+int(W/4)] = zeros_mask
+                # print(xx[:,random_c:random_c+int(C/4),random_h:random_h+int(H/4),random_w:random_w+int(W/4)].shape)
+                # exit()
+            xx[0] = xx_bk
+            # out[0] = xx_bk
+            outs.append(xx)
+            
+        split_x = outs
+        
         # (B,L,L,2,3)
         pairwise_t_matrix = get_discretized_transformation_matrix(
             pairwise_t_matrix.reshape(-1, L, 4, 4), self.discrete_ratio,
@@ -71,8 +118,8 @@ class V2VNetFusion(nn.Module):
         roi_mask = get_rotated_roi((B * L, L, 1, H, W),
                                    pairwise_t_matrix.reshape(B * L * L, 2, 3))
         roi_mask = roi_mask.reshape(B, L, L, 1, H, W)
-
         batch_node_features = split_x
+        
         # iteratively update the features for num_iteration times
         for l in range(self.num_iteration):
 
@@ -90,14 +137,9 @@ class V2VNetFusion(nn.Module):
                 for i in range(N):
                     # (N,1,H,W)
                     mask = roi_mask[b, :N, i, ...]
-
-                    current_t_matrix = t_matrix[:, i, :, :]
-                    current_t_matrix = get_transformation_matrix(
-                        current_t_matrix, (H, W))
-
                     # (N,C,H,W)
                     neighbor_feature = warp_affine(batch_node_features[b],
-                                                   current_t_matrix,
+                                                   t_matrix[:, i, :, :],
                                                    (H, W))
                     # (N,C,H,W)
                     ego_agent_feature = batch_node_features[b][i].unsqueeze(

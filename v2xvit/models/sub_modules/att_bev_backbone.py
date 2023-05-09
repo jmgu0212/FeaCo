@@ -1,90 +1,20 @@
 import numpy as np
 import torch
 import torch.nn as nn
-class LAM_Module(nn.Module):
-    """ Layer attention module"""
-    def __init__(self, in_dim):
-        super(LAM_Module, self).__init__()
-        self.chanel_in = in_dim
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.softmax  = nn.Softmax(dim=-1)
 
-    def forward(self,x):
-        """
-            inputs :
-                x : input feature maps( B X N X C X H X W)
-            returns :
-                out : attention value + input feature
-                attention: B X N X N
-        """
-        m_batchsize, N, C, height, width = x.size()
-        proj_query = x.view(m_batchsize, N, -1)
-        proj_key = x.view(m_batchsize, N, -1).permute(0, 2, 1)
-        energy = torch.bmm(proj_query, proj_key)
-        energy_new = torch.max(energy, -1, keepdim=True)[0].expand_as(energy)-energy
-        attention = self.softmax(energy_new)
-        proj_value = x.view(m_batchsize, N, -1)
+from v2xvit.models.fuse_modules.self_attn import AttFusion
+from v2xvit.models.sub_modules.auto_encoder import AutoEncoder
 
-        out = torch.bmm(attention, proj_value)
-        out = out.view(m_batchsize, N, C, height, width)
 
-        out = self.gamma*out + x
-        out = out.view(m_batchsize, -1, height, width)
-        return out
-    
-    
-class LAM_Module_v2(nn.Module):
-    """ Layer attention module"""
-    def __init__(self, in_dim,bias=True):
-        super(LAM_Module_v2, self).__init__()
-        self.chanel_in = in_dim
-
-        self.temperature = nn.Parameter(torch.ones(1))
-
-        self.qkv = nn.Conv2d( self.chanel_in ,  self.chanel_in *3, kernel_size=1, bias=bias)
-        # dwconv depthwise conv
-        self.qkv_dwconv = nn.Conv2d(self.chanel_in*3, self.chanel_in*3, kernel_size=3, stride=1, padding=1, groups=self.chanel_in*3, bias=bias)
-        # self.qkv_dwconv = nn.Conv2d(self.chanel_in*3, self.chanel_in*3, kernel_size=3, stride=1, padding=1, bias=bias)
-        self.project_out = nn.Conv2d(self.chanel_in, self.chanel_in, kernel_size=1, bias=bias)
-
-    def forward(self,x):
-        """
-            inputs :
-                x : input feature maps( B * N * C * H * W)
-            returns :
-                out : attention value + input feature
-                attention: B * N * N
-        """
-        # N levels
-        m_batchsize, N, C, height, width = x.size()
-
-        x_input = x.view(m_batchsize,N*C, height, width)
-        qkv = self.qkv_dwconv(self.qkv(x_input))
-        q, k, v = qkv.chunk(3, dim=1)
-        q = q.view(m_batchsize, N, -1)
-        k = k.view(m_batchsize, N, -1)
-        v = v.view(m_batchsize, N, -1)
-
-        q = torch.nn.functional.normalize(q, dim=-1)
-        k = torch.nn.functional.normalize(k, dim=-1)
-
-        attn = (q @ k.transpose(-2, -1)) * self.temperature
-        attn = attn.softmax(dim=-1)
-
-        out_1 = (attn @ v)
-        out_1 = out_1.view(m_batchsize, -1, height, width)
-
-        out_1 = self.project_out(out_1)
-        out_1 = out_1.view(m_batchsize, N, C, height, width)
-
-        out = out_1+x
-        out = out.view(m_batchsize, -1, height, width)
-        return out
-    
-class BaseBEVBackbone(nn.Module):
+class AttBEVBackbone(nn.Module):
     def __init__(self, model_cfg, input_channels):
         super().__init__()
         self.model_cfg = model_cfg
+        self.compress = False
+
+        if 'compression' in model_cfg and model_cfg['compression'] > 0:
+            self.compress = True
+            self.compress_layer = model_cfg['compression']
 
         if 'layer_nums' in self.model_cfg:
 
@@ -112,7 +42,11 @@ class BaseBEVBackbone(nn.Module):
         c_in_list = [input_channels, *num_filters[:-1]]
 
         self.blocks = nn.ModuleList()
+        self.fuse_modules = nn.ModuleList()
         self.deblocks = nn.ModuleList()
+
+        if self.compress:
+            self.compression_modules = nn.ModuleList()
 
         for idx in range(num_levels):
             cur_layers = [
@@ -124,6 +58,13 @@ class BaseBEVBackbone(nn.Module):
                 nn.BatchNorm2d(num_filters[idx], eps=1e-3, momentum=0.01),
                 nn.ReLU()
             ]
+
+            fuse_network = AttFusion(num_filters[idx])
+            self.fuse_modules.append(fuse_network)
+            if self.compress and self.compress_layer - idx > 0:
+                self.compression_modules.append(AutoEncoder(num_filters[idx],
+                                                            self.compress_layer-idx))
+
             for k in range(layer_nums[idx]):
                 cur_layers.extend([
                     nn.Conv2d(num_filters[idx], num_filters[idx],
@@ -170,12 +111,9 @@ class BaseBEVBackbone(nn.Module):
 
         self.num_bev_features = c_in
 
-        # ! annotate this line when using other models
-        self.layer_fusion = LAM_Module_v2(c_in)
-        # self.layer_fusion = LAM_Module(c_in)
-
     def forward(self, data_dict):
         spatial_features = data_dict['spatial_features']
+        record_len = data_dict['record_len']
 
         ups = []
         ret_dict = {}
@@ -183,14 +121,17 @@ class BaseBEVBackbone(nn.Module):
 
         for i in range(len(self.blocks)):
             x = self.blocks[i](x)
+            if self.compress and i < len(self.compression_modules):
+                x = self.compression_modules[i](x)
+            x_fuse = self.fuse_modules[i](x, record_len)
 
             stride = int(spatial_features.shape[2] / x.shape[2])
             ret_dict['spatial_features_%dx' % stride] = x
 
             if len(self.deblocks) > 0:
-                ups.append(self.deblocks[i](x))
+                ups.append(self.deblocks[i](x_fuse))
             else:
-                ups.append(x)
+                ups.append(x_fuse)
 
         if len(ups) > 1:
             x = torch.cat(ups, dim=1)

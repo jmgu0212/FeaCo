@@ -9,7 +9,7 @@ import torch
 import torch.optim as optim
 
 
-def load_saved_model(saved_path, model):
+def load_saved_model(saved_path, model, epoch=None):
     """
     Load saved model if exiseted
 
@@ -39,14 +39,47 @@ def load_saved_model(saved_path, model):
             initial_epoch_ = 0
         return initial_epoch_
 
-    initial_epoch = findLastCheckpoint(saved_path)
-    if initial_epoch > 0:
-        print('resuming by loading epoch %d' % initial_epoch)
+    if os.path.exists(os.path.join(saved_path, 'latest.pth')):
         model.load_state_dict(torch.load(
             os.path.join(saved_path,
-                         'net_epoch%d.pth' % initial_epoch)), strict=False)
+                         'latest.pth')))
+        return 100, model
+    else:
+        if epoch is None:
+            initial_epoch = findLastCheckpoint(saved_path)
+        else:
+            initial_epoch = int(epoch)
+        
+        # initial_epoch = 30
+        if initial_epoch > 0:
+            print('resuming by loading epoch %d' % initial_epoch)
+        
+        state_dict_ = torch.load(os.path.join(saved_path, 'net_epoch%d.pth' % initial_epoch),map_location='cuda:0')
+        state_dict = {}
+        # convert data_parallal to model
+        for k in state_dict_:
+            if k.startswith('module') and not k.startswith('module_list'):
+                state_dict[k[7:]] = state_dict_[k]
+            else:
+                state_dict[k] = state_dict_[k]
+        
+        model_state_dict = model.state_dict()
 
-    return initial_epoch, model
+        for k in state_dict:
+            if k in model_state_dict:
+                if state_dict[k].shape != model_state_dict[k].shape:
+                    print('Skip loading parameter {}, required shape{}, ' \
+                        'loaded shape{}.'.format(
+                        k, model_state_dict[k].shape, state_dict[k].shape))
+                    state_dict[k] = model_state_dict[k]
+            else:
+                print('Drop parameter {}.'.format(k))
+        for k in model_state_dict:
+            if not (k in state_dict):
+                print('No param {}.'.format(k))
+                state_dict[k] = model_state_dict[k]
+        model.load_state_dict(state_dict, strict=False)
+        return initial_epoch, model
 
 
 def setup_train(hypes):

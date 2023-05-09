@@ -1,18 +1,26 @@
+# -*- coding: utf-8 -*-
+# Author: Yue Hu <18671129361@sjtu.edu.cn>
+# License: TDG-Attribution-NonCommercial-NoDistrib
+
+
 import torch.nn as nn
+import torch
 
 from v2xvit.models.sub_modules.pillar_vfe import PillarVFE
 from v2xvit.models.sub_modules.point_pillar_scatter import PointPillarScatter
 from v2xvit.models.sub_modules.base_bev_backbone import BaseBEVBackbone
 from v2xvit.models.sub_modules.downsample_conv import DownsampleConv
 from v2xvit.models.sub_modules.naive_compress import NaiveCompressor
-from v2xvit.models.sub_modules.self_attn import AttFusion
+from v2xvit.models.sub_modules.when2com import When2comFusion
 
 
-class PointPillarOPV2V(nn.Module):
+DEBUG = False
+
+class PointPillarWhen2com(nn.Module):
     def __init__(self, args):
-        super(PointPillarOPV2V, self).__init__()
+        super(PointPillarWhen2com, self).__init__()
 
-        self.max_cav = 5
+        self.max_cav = args['max_cav']
         # PIllar VFE
         self.pillar_vfe = PillarVFE(args['pillar_vfe'],
                                     num_point_features=4,
@@ -20,6 +28,7 @@ class PointPillarOPV2V(nn.Module):
                                     point_cloud_range=args['lidar_range'])
         self.scatter = PointPillarScatter(args['point_pillar_scatter'])
         self.backbone = BaseBEVBackbone(args['base_bev_backbone'], 64)
+        
         # used to downsample the feature map for efficient computation
         self.shrink_flag = False
         if 'shrink_header' in args:
@@ -30,14 +39,13 @@ class PointPillarOPV2V(nn.Module):
         if args['compression'] > 0:
             self.compression = True
             self.naive_compressor = NaiveCompressor(256, args['compression'])
+        
+        self.fusion_net = When2comFusion(args['v2vfusion'])
 
-        self.fusion_net = AttFusion(256)
-
-        self.cls_head = nn.Conv2d(192 * 2, args['anchor_number'],
+        self.cls_head = nn.Conv2d(128 * 2, args['anchor_number'],
                                   kernel_size=1)
-        self.reg_head = nn.Conv2d(192 * 2, 7 * args['anchor_number'],
+        self.reg_head = nn.Conv2d(128 * 2, 7 * args['anchor_number'],
                                   kernel_size=1)
-
         if args['backbone_fix']:
             self.backbone_fix()
 
@@ -71,23 +79,27 @@ class PointPillarOPV2V(nn.Module):
         voxel_coords = data_dict['processed_lidar']['voxel_coords']
         voxel_num_points = data_dict['processed_lidar']['voxel_num_points']
         record_len = data_dict['record_len']
-        spatial_correction_matrix = data_dict['spatial_correction_matrix']
+        # lidar_pose = data_dict['lidar_pose']  # [sum(cav), 6]
 
-        # B, max_cav, 3(dt dv infra), 1, 1
-        prior_encoding =\
-            data_dict['prior_encoding'].unsqueeze(-1).unsqueeze(-1)
+        pairwise_t_matrix = data_dict['pairwise_t_matrix']
 
         batch_dict = {'voxel_features': voxel_features,
                       'voxel_coords': voxel_coords,
                       'voxel_num_points': voxel_num_points,
                       'record_len': record_len}
+
+
         # n, 4 -> n, c
         batch_dict = self.pillar_vfe(batch_dict)
         # n, c -> N, C, H, W
         batch_dict = self.scatter(batch_dict)
-        batch_dict = self.backbone(batch_dict)
+        if DEBUG:
+            origin_feature = torch.clone(batch_dict['spatial_features'])
 
+        batch_dict = self.backbone(batch_dict)
+        # N, C, H', W'. [N, 256, 50, 176]
         spatial_features_2d = batch_dict['spatial_features_2d']
+
         # downsample feature to reduce memory
         if self.shrink_flag:
             spatial_features_2d = self.shrink_conv(spatial_features_2d)
@@ -95,7 +107,17 @@ class PointPillarOPV2V(nn.Module):
         if self.compression:
             spatial_features_2d = self.naive_compressor(spatial_features_2d)
 
-        fused_feature = self.fusion_net(spatial_features_2d, record_len)
+        # spatial_features_2d is [sum(cav_num), 256, 50, 176]
+        # output only contains ego
+        # [B, 256, 50, 176]
+        if DEBUG:
+            self.fusion_net.forward_debug(spatial_features_2d, origin_feature,record_len, pairwise_t_matrix)
+            raise
+
+
+        fused_feature = self.fusion_net(spatial_features_2d,
+                                        record_len,
+                                        pairwise_t_matrix)
 
         psm = self.cls_head(fused_feature)
         rm = self.reg_head(fused_feature)

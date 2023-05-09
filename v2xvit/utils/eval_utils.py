@@ -148,3 +148,4 @@ def eval_final_results(result_stat, save_path):
     print('The Average Precision at IOU 0.3 is %.2f, '
           'The Average Precision at IOU 0.5 is %.2f, '
           'The Average Precision at IOU 0.7 is %.2f' % (ap_30, ap_50, ap_70))
+    return ap_30, ap_50, ap_70

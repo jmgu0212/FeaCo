@@ -15,6 +15,8 @@ from v2xvit.data_utils.pre_processor import build_preprocessor
 from v2xvit.utils.pcd_utils import \
     mask_points_by_range, mask_ego_points, shuffle_points, \
     downsample_lidar_minimum
+from v2xvit.utils.pose_utils import add_noise_data_dict
+from v2xvit.utils.transformation_utils import x1_to_x2
 
 
 class IntermediateFusionDataset(basedataset.BaseDataset):
@@ -36,6 +38,8 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
         base_data_dict = \
             self.retrieve_base_data(idx,
                                     cur_ego_pose_flag=self.cur_ego_pose_flag)
+        base_data_dict = add_noise_data_dict(base_data_dict,self.params['noise_setting'])
+
 
         processed_data_dict = OrderedDict()
         processed_data_dict['ego'] = {}
@@ -210,8 +214,11 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
         selected_cav_processed = {}
 
         # calculate the transformation matrix
+        # transformation_matrix = \
+        #     selected_cav_base['params']['transformation_matrix']
         transformation_matrix = \
-            selected_cav_base['params']['transformation_matrix']
+            x1_to_x2(selected_cav_base['params']['lidar_pose'],
+                     ego_pose) # T_ego_cav
 
         # retrieve objects under ego coordinates
         object_bbx_center, object_bbx_mask, object_ids = \

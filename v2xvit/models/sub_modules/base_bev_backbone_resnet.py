@@ -1,38 +1,11 @@
 import numpy as np
 import torch
 import torch.nn as nn
-class LAM_Module(nn.Module):
-    """ Layer attention module"""
-    def __init__(self, in_dim):
-        super(LAM_Module, self).__init__()
-        self.chanel_in = in_dim
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.softmax  = nn.Softmax(dim=-1)
 
-    def forward(self,x):
-        """
-            inputs :
-                x : input feature maps( B X N X C X H X W)
-            returns :
-                out : attention value + input feature
-                attention: B X N X N
-        """
-        m_batchsize, N, C, height, width = x.size()
-        proj_query = x.view(m_batchsize, N, -1)
-        proj_key = x.view(m_batchsize, N, -1).permute(0, 2, 1)
-        energy = torch.bmm(proj_query, proj_key)
-        energy_new = torch.max(energy, -1, keepdim=True)[0].expand_as(energy)-energy
-        attention = self.softmax(energy_new)
-        proj_value = x.view(m_batchsize, N, -1)
+# from v2xvit.models.sub_modules.resblock import ResNetModified, BasicBlock,Bottleneck,Bottle2neck
+from v2xvit.models.sub_modules.res2net import Res2Net,Bottle2neck
+DEBUG = False
 
-        out = torch.bmm(attention, proj_value)
-        out = out.view(m_batchsize, N, C, height, width)
-
-        out = self.gamma*out + x
-        out = out.view(m_batchsize, -1, height, width)
-        return out
-    
-    
 class LAM_Module_v2(nn.Module):
     """ Layer attention module"""
     def __init__(self, in_dim,bias=True):
@@ -42,20 +15,17 @@ class LAM_Module_v2(nn.Module):
         self.temperature = nn.Parameter(torch.ones(1))
 
         self.qkv = nn.Conv2d( self.chanel_in ,  self.chanel_in *3, kernel_size=1, bias=bias)
-        # dwconv depthwise conv
         self.qkv_dwconv = nn.Conv2d(self.chanel_in*3, self.chanel_in*3, kernel_size=3, stride=1, padding=1, groups=self.chanel_in*3, bias=bias)
-        # self.qkv_dwconv = nn.Conv2d(self.chanel_in*3, self.chanel_in*3, kernel_size=3, stride=1, padding=1, bias=bias)
         self.project_out = nn.Conv2d(self.chanel_in, self.chanel_in, kernel_size=1, bias=bias)
 
     def forward(self,x):
         """
             inputs :
-                x : input feature maps( B * N * C * H * W)
+                x : input feature maps( B X N X C X H X W)
             returns :
                 out : attention value + input feature
-                attention: B * N * N
+                attention: B X N X N
         """
-        # N levels
         m_batchsize, N, C, height, width = x.size()
 
         x_input = x.view(m_batchsize,N*C, height, width)
@@ -80,8 +50,9 @@ class LAM_Module_v2(nn.Module):
         out = out_1+x
         out = out.view(m_batchsize, -1, height, width)
         return out
-    
-class BaseBEVBackbone(nn.Module):
+
+
+class ResNetBEVBackbone(nn.Module):
     def __init__(self, model_cfg, input_channels):
         super().__init__()
         self.model_cfg = model_cfg
@@ -108,31 +79,18 @@ class BaseBEVBackbone(nn.Module):
         else:
             upsample_strides = num_upsample_filters = []
 
-        num_levels = len(layer_nums)
-        c_in_list = [input_channels, *num_filters[:-1]]
+        # self.resnet = ResNetModified(BasicBlock, 
+        #                                 layer_nums,
+        #                                 layer_strides,
+        #                                 num_filters)
+        
+        self.resnet = Res2Net(Bottle2neck, layer_nums, baseWidth = 26, scale = 4)
 
-        self.blocks = nn.ModuleList()
+        num_levels = len(layer_nums)
+        self.num_levels = len(layer_nums)
         self.deblocks = nn.ModuleList()
 
         for idx in range(num_levels):
-            cur_layers = [
-                nn.ZeroPad2d(1),
-                nn.Conv2d(
-                    c_in_list[idx], num_filters[idx], kernel_size=3,
-                    stride=layer_strides[idx], padding=0, bias=False
-                ),
-                nn.BatchNorm2d(num_filters[idx], eps=1e-3, momentum=0.01),
-                nn.ReLU()
-            ]
-            for k in range(layer_nums[idx]):
-                cur_layers.extend([
-                    nn.Conv2d(num_filters[idx], num_filters[idx],
-                              kernel_size=3, padding=1, bias=False),
-                    nn.BatchNorm2d(num_filters[idx], eps=1e-3, momentum=0.01),
-                    nn.ReLU()
-                ])
-
-            self.blocks.append(nn.Sequential(*cur_layers))
             if len(upsample_strides) > 0:
                 stride = upsample_strides[idx]
                 if stride >= 1:
@@ -169,35 +127,33 @@ class BaseBEVBackbone(nn.Module):
             ))
 
         self.num_bev_features = c_in
-
-        # ! annotate this line when using other models
         self.layer_fusion = LAM_Module_v2(c_in)
-        # self.layer_fusion = LAM_Module(c_in)
 
     def forward(self, data_dict):
+        
+        #[2,64,200,704]
         spatial_features = data_dict['spatial_features']
-
+        
+       #[2,64,100,352],[2,128,50,176],[2,256,25,88]
+        x = self.resnet(spatial_features)  # tuple of features
+        
         ups = []
-        ret_dict = {}
-        x = spatial_features
 
-        for i in range(len(self.blocks)):
-            x = self.blocks[i](x)
-
-            stride = int(spatial_features.shape[2] / x.shape[2])
-            ret_dict['spatial_features_%dx' % stride] = x
-
+        for i in range(self.num_levels):
             if len(self.deblocks) > 0:
-                ups.append(self.deblocks[i](x))
+                ups.append(self.deblocks[i](x[i]))
             else:
-                ups.append(x)
+                ups.append(x[i])
 
         if len(ups) > 1:
-            x = torch.cat(ups, dim=1)
+            # x = torch.cat(ups, dim=1)
+            inp_fusion= torch.cat([ups[0].unsqueeze(1), ups[1].unsqueeze(1), ups[2].unsqueeze(1)], dim=1)
+            x = self.layer_fusion(inp_fusion)
+
         elif len(ups) == 1:
             x = ups[0]
 
-        if len(self.deblocks) > len(self.blocks):
+        if len(self.deblocks) > self.num_levels:
             x = self.deblocks[-1](x)
 
         data_dict['spatial_features_2d'] = x

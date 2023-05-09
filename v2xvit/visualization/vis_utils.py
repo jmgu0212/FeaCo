@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Author: Runsheng Xu <rxx3386@ucla.edu>, Hao Xiang <haxiang@g.ucla.edu>,
+# License: TDG-Attribution-NonCommercial-NoDistrib
+
 import time
 
 import cv2
@@ -145,6 +149,7 @@ def bbx2aabb(bbx_center, order):
 
     return aabbs
 
+
 def linset_assign_list(vis,
                        lineset_list1,
                        lineset_list2,
@@ -288,6 +293,8 @@ def visualize_single_sample_output_gt(pred_tensor,
         vis.run()
         vis.destroy_window()
 
+    if len(pcd.shape) == 3:
+        pcd = pcd[0]
     origin_lidar = pcd
     if not isinstance(pcd, np.ndarray):
         origin_lidar = common_utils.torch_tensor_to_numpy(pcd)
@@ -310,56 +317,6 @@ def visualize_single_sample_output_gt(pred_tensor,
         custom_draw_geometry(o3d_pcd, oabbs_pred, oabbs_gt)
     if save_path:
         save_o3d_visualization(visualize_elements, save_path)
-
-
-def visualize_sequence_sample_output(pred_tensor_list,
-                                     gt_tensor_list,
-                                     pcd_list):
-    vis = o3d.visualization.Visualizer()
-    vis.create_window()
-
-    vis.get_render_option().background_color = [0.05, 0.05, 0.05]
-    vis.get_render_option().point_size = 1.0
-    vis.get_render_option().show_coordinate_frame = True
-
-    # used to visualize lidar points
-    vis_pcd = o3d.geometry.PointCloud()
-
-    while True:
-        for i, (pred_tensor, gt_tensor, pcd) in \
-                enumerate(zip(pred_tensor_list, gt_tensor_list, pcd_list)):
-            pred_tensor = pred_tensor.copy()
-            gt_tensor = gt_tensor.copy()
-            pcd = pcd.copy()
-
-            pcd_intcolor = color_encoding(pcd[:, -1])
-            pcd[:, :1] = -pcd[:, :1]
-            vis_pcd.points = o3d.utility.Vector3dVector(pcd[:, :3])
-            vis_pcd.colors = o3d.utility.Vector3dVector(pcd_intcolor)
-
-            oabbs_pred = bbx2oabb(pred_tensor, 'hwl')
-            oabbs_gt = bbx2oabb(gt_tensor, 'hwl', color=(0, 1, 0))
-            oabbs = oabbs_pred + oabbs_gt
-
-            if i == 0:
-                vis.add_geometry(vis_pcd)
-
-            for oabb in oabbs:
-                vis.add_geometry(oabb)
-
-            vis.update_geometry(vis_pcd)
-
-            ctr = vis.get_view_control()
-            param = o3d.io.read_pinhole_camera_parameters('pinhole_param.json')
-            ctr.convert_from_pinhole_camera_parameters(param)
-
-            vis.poll_events()
-            vis.update_renderer()
-
-            for oabb in oabbs:
-                vis.remove_geometry(oabb)
-            time.sleep(0.01)
-    vis.destroy_window()
 
 
 def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
@@ -451,7 +408,6 @@ def visualize_single_sample_dataloader(batch_data,
 
     key : str
         origin_lidar for late fusion and stacked_lidar for early fusion.
-        todo: consider intermediate fusion in the future.
 
     visualize : bool
         Whether to visualize the sample.
@@ -529,6 +485,10 @@ def visualize_inference_sample_dataloader(pred_box_tensor,
     # we only visualize the first cav for single sample
     if len(origin_lidar.shape) > 2:
         origin_lidar = origin_lidar[0]
+    # this is for 2-stage origin lidar, it has different format
+    if origin_lidar.shape[1] > 4:
+        origin_lidar = origin_lidar[:, 1:]
+
     origin_lidar_intcolor = \
         color_encoding(origin_lidar[:, -1] if mode == 'intensity'
                        else origin_lidar[:, 2], mode=mode)
@@ -650,3 +610,63 @@ def visualize_bev(batch_data):
     plt.matshow(label_map[0, :, :])
     plt.axis("off")
     plt.show()
+
+
+def draw_box_plt(boxes_dec, ax, color=None, linewidth_scale=1.0):
+    """
+    draw boxes in a given plt ax
+    :param boxes_dec: (N, 5) or (N, 7) in metric
+    :param ax:
+    :return: ax with drawn boxes
+    """
+    if not len(boxes_dec)>0:
+        return ax
+    boxes_np= boxes_dec
+    if not isinstance(boxes_np, np.ndarray):
+        boxes_np = boxes_np.cpu().detach().numpy()
+    if boxes_np.shape[-1]>5:
+        boxes_np = boxes_np[:, [0, 1, 3, 4, 6]]
+    x = boxes_np[:, 0]
+    y = boxes_np[:, 1]
+    dx = boxes_np[:, 2]
+    dy = boxes_np[:, 3]
+
+    x1 = x - dx / 2
+    y1 = y - dy / 2
+    x2 = x + dx / 2
+    y2 = y + dy / 2
+    theta = boxes_np[:, 4:5]
+    # bl, fl, fr, br
+    corners = np.array([[x1, y1],[x1,y2], [x2,y2], [x2, y1]]).transpose(2, 0, 1)
+    new_x = (corners[:, :, 0] - x[:, None]) * np.cos(theta) + (corners[:, :, 1]
+              - y[:, None]) * (-np.sin(theta)) + x[:, None]
+    new_y = (corners[:, :, 0] - x[:, None]) * np.sin(theta) + (corners[:, :, 1]
+              - y[:, None]) * (np.cos(theta)) + y[:, None]
+    corners = np.stack([new_x, new_y], axis=2)
+    for corner in corners:
+        ax.plot(corner[[0,1,2,3,0], 0], corner[[0,1,2,3,0], 1], color=color, linewidth=0.5*linewidth_scale)
+        # draw front line (
+        ax.plot(corner[[2, 3], 0], corner[[2, 3], 1], color=color, linewidth=2*linewidth_scale)
+    return ax
+
+
+def draw_points_boxes_plt(pc_range, points=None, boxes_pred=None, boxes_gt=None, save_path=None,
+                          points_c='y.', bbox_gt_c='green', bbox_pred_c='red', return_ax=False, ax=None):
+    if ax is None:
+        ax = plt.figure(figsize=(15, 6)).add_subplot(1, 1, 1)
+        ax.set_aspect('equal', 'box')
+        ax.set(xlim=(pc_range[0], pc_range[3]),
+               ylim=(pc_range[1], pc_range[4]))
+    if points is not None:
+        ax.plot(points[:, 0], points[:, 1], points_c, markersize=0.1)
+    if (boxes_gt is not None) and len(boxes_gt)>0:
+        ax = draw_box_plt(boxes_gt, ax, color=bbox_gt_c)
+    if (boxes_pred is not None) and len(boxes_pred)>0:
+        ax = draw_box_plt(boxes_pred, ax, color=bbox_pred_c)
+    plt.xlabel('x')
+    plt.ylabel('y')
+
+    plt.savefig(save_path)
+    if return_ax:
+        return ax
+    plt.close()

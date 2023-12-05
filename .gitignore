@@ -1,3 +1,11 @@
+# temporary ignore files
+v2xvit/
+Env.yaml
+LICENSE
+requirements.txt
+setup.py
+README_formal.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

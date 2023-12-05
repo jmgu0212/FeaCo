@@ -25,4 +25,4 @@ The code will be released after the publication of the subsequent work.
 ```
 
 ## Acknowledgment
-FeaCo is built upon [OpenCOOD](https://github.com/DerrickXuNu/OpenCOOD) and [V2X-ViT](https://github.com/DerrickXuNu/v2x-vit). 
+FeaCo is built upon [OpenCOOD](https://github.com/DerrickXuNu/OpenCOOD) and [V2X-ViT](https://github.com/DerrickXuNu/v2x-vit), thanks for high-quality datesets and excellent codebases. 
